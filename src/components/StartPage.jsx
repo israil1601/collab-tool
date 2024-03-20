@@ -1,17 +1,23 @@
+// import { Button } from '@mui/base'
+import { Box, TextField } from '@mui/material'
 import { useState } from 'react'
+import Button from '@mui/material/Button';
 
-function StartPage({setCurrentUsername, setCurrentChannel, handleChannelJoin}) {
-  
+function StartPage({ setCurrentUsername, setCurrentChannel, handleChannelJoin }) {
+
   return (
-    <form onSubmit={handleChannelJoin}>
-      <label> Username: 
-      <input type="text" name="usernameInput" id="usernameInput" onChange={e => setCurrentUsername(e.target.value)}  />
-      </label>
-      <label> Channel name: 
-      <input type="text" name="channelInput" id="channelInput" onChange={e => setCurrentChannel(e.target.value)}  />
-      </label>
-      <input type="submit" value="Join channel" />
-    </form>
+    <Box component='form' onSubmit={handleChannelJoin} display="flex" flexDirection="column" alignItems="center" padding={1} >
+      <TextField label="Username" variant="outlined" margin="normal" onChange={e => setCurrentUsername(e.target.value)}
+      />
+      <TextField label="Channel name" variant="outlined" margin="normal" onChange={e => setCurrentChannel(e.target.value)}
+      />
+
+      <Button
+        variant="contained"
+        color="primary"
+        type="submit"
+      > Join channel </Button>     
+    </Box>
   )
 }
 

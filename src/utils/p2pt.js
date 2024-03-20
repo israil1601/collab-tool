@@ -4,6 +4,7 @@ import clone from 'clone'
 import Peer from 'simple-peer'
 import Socket from 'simple-websocket'
 import Socks from 'socks'
+import EventEmitter from './EventEmitter'
 const socketPool = {}
 const RECONNECT_MINIMUM = 10 * 1000
 const RECONNECT_MAXIMUM = 60 * 60 * 1000
@@ -18,23 +19,7 @@ const OFFER_TIMEOUT = 50 * 1000
   */
  const MAX_MESSAGE_LENGTH = 16000
 
- class EventEmitter{
-  constructor(){
-      this.callbacks = {}
-  }
 
-  on(event, cb){
-      if(!this.callbacks[event]) this.callbacks[event] = [];
-      this.callbacks[event].push(cb)
-  }
-
-  emit(event, data){
-      let cbs = this.callbacks[event]
-      if(cbs){
-          cbs.forEach(cb => cb(data))
-      }
-  }
-}
 
  
  export default class P2PT extends EventEmitter {

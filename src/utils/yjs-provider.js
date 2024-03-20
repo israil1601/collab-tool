@@ -124,7 +124,7 @@ const readMessage = (provider, buf, emitSynced) => {
     if (/** @type {any} */ (messageHandler)) {
         messageHandler(encoder, decoder, provider, emitSynced, messageType)
     } else {
-        console.error('Unable to compute message')
+        console.error('Unable to compute message: ')
     }
     return encoder
 }
@@ -143,7 +143,10 @@ const setupPeerConnection = (provider) => {
         })
 
         provider.p2pt.on("peerclose", (peer) => {
-            provider.remotePeers = provider.remotePeers.filter(({ id }) => peer.id != id);
+            provider.remotePeers = provider.remotePeers.filter(remotePeer => peer.id != remotePeer.peer.id);
+            if (provider.userChangeListener) {
+                provider.userChangeListener();
+            }
             const isLastPeer = provider.remotePeers.length === 0;
             if (isLastPeer) {
                 provider.emit('connection-close', ["connection-close", provider])
@@ -165,10 +168,73 @@ const setupPeerConnection = (provider) => {
         })
 
         provider.p2pt.on("peerconnect", async peer => {
+            console.log(`peer: ${JSON.stringify(peer)}`)
             peer.on('data', msg => {
                 if (!msg) {
                     console.log(`received undefined message, skipping. Peer: ${peer.id}`)
                     return;
+                }
+                try {
+                    const messageString = new TextDecoder().decode(msg);
+                    if (messageString.startsWith("chat")) {
+                        const incomingChatMessage = messageString.substring(4);
+                        console.log("chat: " + incomingChatMessage)
+                        const messageObject = JSON.parse(incomingChatMessage)
+                        console.log(`emitting obj: ${messageObject.from} , ${messageObject.message}`)
+                        // provider.emit("chat", incomingChatMessage)
+                        provider.notifyChatMessage(messageObject)
+                        return;
+                    }
+                    if (messageString.startsWith("ping")) {
+                        const timestamp = messageString.substring(4);
+                        console.log(`received ping request`);
+                        const pingResponse = { username: provider.username, timestamp }
+                        peer.send('pong' + JSON.stringify(pingResponse))
+                        return;
+                    }
+                    if (messageString.startsWith("pong")) {
+                        console.log(`received pong ${messageString}`);
+                        const timestamp = new Date().getTime();
+                        const pongResponse = messageString.substring(4);
+                        const pongObject = JSON.parse(pongResponse);
+                        const ping = timestamp - pongObject.timestamp;
+                        provider.addPingValue(pongObject.username, ping);
+                        return;
+                    }
+                    if (messageString.startsWith("name")) {
+                        const username = messageString.substring(4);
+                        const peerData = { peer, username }
+                        provider.remotePeers.push(peerData);
+                        if (provider.userChangeListener) {
+                            provider.userChangeListener();
+                        }
+                        provider.lastMessageReceived = time.getUnixTime()
+                        provider.connecting = false
+                        provider.connected = true
+                        provider.emit('status', [{
+                            status: 'connected'
+                        }])
+                        // always send sync step 1 when connected
+                        const encoder = encoding.createEncoder()
+                        encoding.writeVarUint(encoder, messageSync)
+                        syncProtocol.writeSyncStep1(encoder, provider.doc)
+                        provider.sendToPeers(encoding.toUint8Array(encoder))
+                        // broadcast local awareness state
+                        if (provider.awareness.getLocalState() !== null) {
+                            const encoderAwarenessState = encoding.createEncoder()
+                            encoding.writeVarUint(encoderAwarenessState, messageAwareness)
+                            encoding.writeVarUint8Array(
+                                encoderAwarenessState,
+                                awarenessProtocol.encodeAwarenessUpdate(provider.awareness, [
+                                    provider.doc.clientID
+                                ])
+                            )
+                            provider.sendToPeers(encoding.toUint8Array(encoderAwarenessState))
+                        }
+                        return;
+                    }
+                } catch(e) {
+                    console.log(`could not parse message: ${msg}, error: ${e}`)
                 }
                 provider.lastMessageReceived = time.getUnixTime()
                 const encoder = readMessage(provider, new Uint8Array(msg), true)
@@ -176,30 +242,7 @@ const setupPeerConnection = (provider) => {
                     provider.sendToPeers(encoding.toUint8Array(encoder))
                 }
             })
-            provider.remotePeers.push(peer);
-            provider.lastMessageReceived = time.getUnixTime()
-            provider.connecting = false
-            provider.connected = true
-            provider.emit('status', [{
-                status: 'connected'
-            }])
-            // always send sync step 1 when connected
-            const encoder = encoding.createEncoder()
-            encoding.writeVarUint(encoder, messageSync)
-            syncProtocol.writeSyncStep1(encoder, provider.doc)
-            provider.sendToPeers(encoding.toUint8Array(encoder))
-            // broadcast local awareness state
-            if (provider.awareness.getLocalState() !== null) {
-                const encoderAwarenessState = encoding.createEncoder()
-                encoding.writeVarUint(encoderAwarenessState, messageAwareness)
-                encoding.writeVarUint8Array(
-                    encoderAwarenessState,
-                    awarenessProtocol.encodeAwarenessUpdate(provider.awareness, [
-                        provider.doc.clientID
-                    ])
-                )
-                provider.sendToPeers(encoding.toUint8Array(encoderAwarenessState))
-            }
+            peer.send(`name${provider.username}`)
         })
 
         provider.p2pt.on("trackerconnect", (tracker, stats) => {
@@ -217,7 +260,7 @@ const setupPeerConnection = (provider) => {
 
 export class P2ptProvider extends ObservableV2 {
 
-    constructor(roomname, doc) {
+    constructor(roomname, doc, username) {
         super()
         const channelIdentifier = `${IDENTIFIER}/${roomname}`;
         this.p2pt = new P2PT(trackersAnnounceURLs, channelIdentifier);
@@ -228,6 +271,7 @@ export class P2ptProvider extends ObservableV2 {
         this.connecting = false
         this.messageHandlers = messageHandlers.slice()
         this.remotePeers = [];
+        this.username = username
         /**
          * @type {boolean}
          */
@@ -294,7 +338,27 @@ export class P2ptProvider extends ObservableV2 {
 
 
     sendToPeers(msg) {
-        this.remotePeers.forEach(peer => peer.send(msg));
+        this.remotePeers.forEach(({ peer }) => peer.send(msg));
+    }
+
+    getPeerUsernames() {
+        return this.remotePeers.map(({username}) => username)
+    }
+
+    sendToSinglePeer(peerUsername, data) {
+        const targetPeer = this.remotePeers.find(({ username }) => username === peerUsername)
+        if (targetPeer) {
+            targetPeer.send(data);
+        }
+    }
+    
+    sendChatMessage(message) {
+        const messageObject = { from: this.username, message }
+        this.sendToPeers('chat' + JSON.stringify(messageObject))
+    }
+
+    isUsernameTaken(peerUsername) {
+        return this.remotePeers.some(({username}) => peerUsername === username)
     }
 
     /**
@@ -333,6 +397,44 @@ export class P2ptProvider extends ObservableV2 {
         console.log("is connected?", this.connected)
         if (!this.connected) {
             setupPeerConnection(this)
+        }
+    }
+
+    setChatMessageHandler(handler) {
+        this.chatMessageHandler = handler;
+    }
+
+    notifyChatMessage(message) {
+        if (this.chatMessageHandler) {
+            this.chatMessageHandler(message);
+        }
+    }
+
+    setUserChangeListener(listener) {
+        this.userChangeListener = listener
+    }
+
+    getPeerPing(peerUsername) {
+        const targetPeer = this.remotePeers.find(({username}) => username === peerUsername);
+        if (targetPeer && targetPeer.ping) {
+            return targetPeer.ping;
+        }
+        return null;
+    }
+    
+    sendPeerPing(peerUsername) {
+        const targetPeer = this.remotePeers.find(({username}) => username === peerUsername);
+        if (targetPeer && targetPeer.peer) {
+            const timestamp = new Date().getTime();
+            targetPeer.peer.send('ping' + timestamp);
+        }
+    }
+
+    addPingValue(peerUsername, ping) {
+        const targetPeer = this.remotePeers.find(({username}) => username === peerUsername);
+        if (targetPeer) {
+            targetPeer.ping = ping
+            if (this.userChangeListener) this.userChangeListener();
         }
     }
 }
